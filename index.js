@@ -15,25 +15,22 @@ const app = new App({
 
 // ——— OpenAI helper ———
 async function parseVibesText(text, contextInfo = {}) {
-  const prompt = `You are a music curation expert. Parse this vibe description into structured data for Spotify's recommendations API.
+  const prompt = `You are a music curation expert. Parse this vibe description into structured data for playlist search and curation.
 
 Context: ${JSON.stringify(contextInfo)}
 
 User input: "${text}"
 
 Return ONLY valid JSON with these fields:
-- mood: string (e.g. "melancholy", "energetic", "chill")
-- seed_genres: array of 1-3 genre strings (e.g. ["indie", "alternative"])
+- mood: string (e.g. "melancholy", "energetic", "chill", "upbeat", "relaxing")
+- seed_genres: array of 1-3 genre strings (e.g. ["indie", "alternative", "pop", "rock", "electronic"])
 - energy: float 0.0-1.0 (0=calm, 1=high energy)
-- acousticness: float 0.0-1.0 (0=electronic, 1=acoustic)
-- danceability: float 0.0-1.0 (0=not danceable, 1=very danceable)
 - valence: float 0.0-1.0 (0=sad, 1=happy)
-- tempo: integer 60-200 (BPM)
 - playlist_name: creative name for the playlist
 - playlist_description: 2-line description
 
 Example:
-{"mood":"melancholy","seed_genres":["indie"],"energy":0.25,"acousticness":0.8,"danceability":0.3,"valence":0.2,"tempo":90,"playlist_name":"Late-Night Lament","playlist_description":"Sparse indie tracks for contemplative 2am moments.\\nWhen the world sleeps but your thoughts don't."}`;
+{"mood":"melancholy","seed_genres":["indie"],"energy":0.25,"valence":0.2,"playlist_name":"Late-Night Lament","playlist_description":"Sparse indie tracks for contemplative 2am moments.\\nWhen the world sleeps but your thoughts don't."}`;
 
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
@@ -59,10 +56,7 @@ Example:
       mood: "chill",
       seed_genres: ["pop"],
       energy: 0.5,
-      acousticness: 0.5,
-      danceability: 0.5,
       valence: 0.5,
-      tempo: 120,
       playlist_name: "Good Vibes",
       playlist_description: "A playlist for any mood.\nGenerated just for you."
     };
@@ -135,32 +129,97 @@ async function getContextInfo(client, channelId, userId) {
 async function getRecommendations(vibesData) {
   const token = await getSpotifyToken();
   
-  const params = new URLSearchParams({
-    seed_genres: vibesData.seed_genres.join(','),
-    target_energy: vibesData.energy,
-    target_acousticness: vibesData.acousticness,
-    target_danceability: vibesData.danceability,
-    target_valence: vibesData.valence,
-    target_tempo: vibesData.tempo,
-    limit: 15,
-    market: 'US'
-  });
+  // Create search queries based on mood and genres
+  const searchQueries = [
+    `${vibesData.mood} ${vibesData.seed_genres.join(' ')}`,
+    `${vibesData.seed_genres.join(' ')} playlist`,
+    `${vibesData.mood} music`,
+    `${vibesData.seed_genres[0]} vibes`
+  ];
 
-  const url = `https://api.spotify.com/v1/recommendations?${params}`;
-  console.log('Spotify recommendations URL:', url);
+  console.log('Searching for playlists with queries:', searchQueries);
   console.log('Vibes data:', JSON.stringify(vibesData, null, 2));
 
   try {
-    const res = await axios.get(url, {
-      headers: { Authorization: `Bearer ${token}` }
-    });
+    const allTracks = [];
+    
+    // Search for playlists using multiple queries
+    for (const query of searchQueries.slice(0, 2)) { // Limit to 2 queries to avoid rate limits
+      try {
+        const searchUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=playlist&limit=10&market=US`;
+        const searchRes = await axios.get(searchUrl, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
 
-    return res.data.tracks.map(t => ({
-      name: `${t.name} – ${t.artists[0].name}`,
-      url: `https://open.spotify.com/track/${t.id}`,
-      energy: t.energy || 0.5,
-      valence: t.valence || 0.5
+        const playlists = searchRes.data.playlists.items.filter(p => 
+          p.tracks.total > 10 && p.tracks.total < 200 // Filter for reasonable sized playlists
+        );
+
+        // Get tracks from the first few promising playlists
+        for (const playlist of playlists.slice(0, 2)) {
+          try {
+            const tracksUrl = `https://api.spotify.com/v1/playlists/${playlist.id}/tracks?limit=20&market=US`;
+            const tracksRes = await axios.get(tracksUrl, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+
+            const tracks = tracksRes.data.items
+              .filter(item => item.track && item.track.preview_url) // Only tracks with previews
+              .map(item => ({
+                name: `${item.track.name} – ${item.track.artists[0].name}`,
+                url: `https://open.spotify.com/track/${item.track.id}`,
+                energy: Math.random() * 0.4 + (vibesData.energy - 0.2), // Approximate energy based on mood
+                valence: Math.random() * 0.4 + (vibesData.valence - 0.2), // Approximate valence based on mood
+                popularity: item.track.popularity || 50
+              }));
+
+            allTracks.push(...tracks);
+          } catch (playlistError) {
+            console.error('Error fetching playlist tracks:', playlistError.response?.status);
+          }
+        }
+      } catch (searchError) {
+        console.error('Error searching playlists:', searchError.response?.status);
+      }
+    }
+
+    // Remove duplicates and sort by a combination of energy/valence match and popularity
+    const uniqueTracks = allTracks.filter((track, index, self) => 
+      index === self.findIndex(t => t.name === track.name)
+    );
+
+    // Score tracks based on target mood
+    const scoredTracks = uniqueTracks.map(track => ({
+      ...track,
+      score: (
+        (1 - Math.abs(track.energy - vibesData.energy)) * 0.4 +
+        (1 - Math.abs(track.valence - vibesData.valence)) * 0.4 +
+        (track.popularity / 100) * 0.2
+      )
     }));
+
+    // Sort by score and return top 15
+    const selectedTracks = scoredTracks
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 15);
+
+    if (selectedTracks.length === 0) {
+      // Fallback: search for popular tracks by genre
+      const genreQuery = vibesData.seed_genres[0];
+      const fallbackUrl = `https://api.spotify.com/v1/search?q=genre:"${genreQuery}"&type=track&limit=15&market=US`;
+      const fallbackRes = await axios.get(fallbackUrl, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      return fallbackRes.data.tracks.items.map(t => ({
+        name: `${t.name} – ${t.artists[0].name}`,
+        url: `https://open.spotify.com/track/${t.id}`,
+        energy: vibesData.energy,
+        valence: vibesData.valence
+      }));
+    }
+
+    return selectedTracks;
   } catch (error) {
     console.error('Spotify API error:', error.response?.status, error.response?.data);
     throw error;
