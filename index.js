@@ -49,7 +49,16 @@ Example:
   );
 
   try {
-    return JSON.parse(response.data.choices[0].message.content.trim());
+    let content = response.data.choices[0].message.content.trim();
+    
+    // Remove markdown code blocks if present
+    if (content.startsWith('```json')) {
+      content = content.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    } else if (content.startsWith('```')) {
+      content = content.replace(/^```\s*/, '').replace(/\s*```$/, '');
+    }
+    
+    return JSON.parse(content);
   } catch (e) {
     console.error('Failed to parse OpenAI response:', response.data.choices[0].message.content);
     return {
@@ -67,24 +76,35 @@ Example:
 let spotifyToken = null;
 async function getSpotifyToken() {
   if (spotifyToken) return spotifyToken; // naive cache
-  const rsp = await axios.post(
-    'https://accounts.spotify.com/api/token',
-    new URLSearchParams({ grant_type: 'client_credentials' }).toString(),
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization:
-          'Basic ' +
-          Buffer.from(
-            `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
-          ).toString('base64')
+  
+  try {
+    const rsp = await axios.post(
+      'https://accounts.spotify.com/api/token',
+      new URLSearchParams({ grant_type: 'client_credentials' }).toString(),
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization:
+            'Basic ' +
+            Buffer.from(
+              `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
+            ).toString('base64')
+        }
       }
-    }
-  );
-  spotifyToken = rsp.data.access_token;
-  // auto-expire after 50 min
-  setTimeout(() => (spotifyToken = null), 50 * 60 * 1000);
-  return spotifyToken;
+    );
+    spotifyToken = rsp.data.access_token;
+    // auto-expire after 50 min
+    setTimeout(() => (spotifyToken = null), 50 * 60 * 1000);
+    return spotifyToken;
+  } catch (error) {
+    console.error('Error getting Spotify token:', {
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      message: error.message
+    });
+    throw error;
+  }
 }
 
 async function getContextInfo(client, channelId, userId) {
@@ -129,6 +149,10 @@ async function getContextInfo(client, channelId, userId) {
 async function getRecommendations(vibesData) {
   const token = await getSpotifyToken();
   
+  if (!token) {
+    throw new Error('Failed to get Spotify access token');
+  }
+  
   // Create search queries based on mood and genres
   const searchQueries = [
     `${vibesData.mood} ${vibesData.seed_genres.join(' ')}`,
@@ -147,12 +171,17 @@ async function getRecommendations(vibesData) {
     for (const query of searchQueries.slice(0, 2)) { // Limit to 2 queries to avoid rate limits
       try {
         const searchUrl = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=playlist&limit=10&market=US`;
+        console.log(`Making Spotify search request to: ${searchUrl}`);
+        
         const searchRes = await axios.get(searchUrl, {
           headers: { Authorization: `Bearer ${token}` }
         });
+        
+        console.log(`Spotify search response status: ${searchRes.status}`);
+        console.log(`Found ${searchRes.data?.playlists?.items?.length || 0} playlists`);
 
-        const playlists = searchRes.data.playlists.items.filter(p => 
-          p.tracks.total > 10 && p.tracks.total < 200 // Filter for reasonable sized playlists
+        const playlists = (searchRes.data?.playlists?.items || []).filter(p => 
+          p && p.tracks && p.tracks.total > 10 && p.tracks.total < 200 // Filter for reasonable sized playlists
         );
 
         // Get tracks from the first few promising playlists
@@ -163,23 +192,39 @@ async function getRecommendations(vibesData) {
               headers: { Authorization: `Bearer ${token}` }
             });
 
-            const tracks = tracksRes.data.items
-              .filter(item => item.track && item.track.preview_url) // Only tracks with previews
+            const tracks = (tracksRes.data?.items || [])
+              .filter(item => item?.track && item.track.name && item.track.artists?.[0]?.name) // Filter valid tracks
               .map(item => ({
                 name: `${item.track.name} – ${item.track.artists[0].name}`,
                 url: `https://open.spotify.com/track/${item.track.id}`,
-                energy: Math.random() * 0.4 + (vibesData.energy - 0.2), // Approximate energy based on mood
-                valence: Math.random() * 0.4 + (vibesData.valence - 0.2), // Approximate valence based on mood
+                energy: Math.max(0, Math.min(1, Math.random() * 0.4 + (vibesData.energy - 0.2))), // Clamp to 0-1
+                valence: Math.max(0, Math.min(1, Math.random() * 0.4 + (vibesData.valence - 0.2))), // Clamp to 0-1
                 popularity: item.track.popularity || 50
               }));
 
             allTracks.push(...tracks);
           } catch (playlistError) {
-            console.error('Error fetching playlist tracks:', playlistError.response?.status);
+            console.error('Error fetching playlist tracks:', {
+              status: playlistError.response?.status,
+              statusText: playlistError.response?.statusText,
+              data: playlistError.response?.data,
+              message: playlistError.message,
+              playlistId: playlist.id
+            });
           }
         }
       } catch (searchError) {
-        console.error('Error searching playlists:', searchError.response?.status);
+        console.error('Full error object:', searchError);
+        console.error('Error searching playlists:', {
+          status: searchError.response?.status,
+          statusText: searchError.response?.statusText,
+          data: searchError.response?.data,
+          message: searchError.message,
+          code: searchError.code,
+          query: query,
+          hasResponse: !!searchError.response,
+          errorKeys: Object.keys(searchError)
+        });
       }
     }
 
@@ -211,12 +256,14 @@ async function getRecommendations(vibesData) {
         headers: { Authorization: `Bearer ${token}` }
       });
 
-      return fallbackRes.data.tracks.items.map(t => ({
-        name: `${t.name} – ${t.artists[0].name}`,
-        url: `https://open.spotify.com/track/${t.id}`,
-        energy: vibesData.energy,
-        valence: vibesData.valence
-      }));
+      return (fallbackRes.data?.tracks?.items || [])
+        .filter(t => t?.name && t?.artists?.[0]?.name)
+        .map(t => ({
+          name: `${t.name} – ${t.artists[0].name}`,
+          url: `https://open.spotify.com/track/${t.id}`,
+          energy: vibesData.energy,
+          valence: vibesData.valence
+        }));
     }
 
     return selectedTracks;
