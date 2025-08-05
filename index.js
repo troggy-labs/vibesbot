@@ -101,19 +101,28 @@ async function getContextInfo(client, channelId, userId) {
     hour12: true 
   });
   
+  console.log(`Attempting to get history for channel: ${channelId}, user: ${userId}`);
+  
   let recentMessages = [];
   try {
+    // First check if we can access the channel info
+    const channelInfo = await client.conversations.info({ channel: channelId });
+    console.log(`Channel info:`, channelInfo.channel.name, channelInfo.channel.is_member);
+    
     const history = await client.conversations.history({
       channel: channelId,
       limit: 5
     });
+    
+    console.log(`Got ${history.messages.length} messages`);
+    
     recentMessages = history.messages
       .filter(msg => msg.user === userId)
       .slice(0, 3)
       .map(msg => msg.text || '')
       .reverse();
   } catch (e) {
-    console.error('Failed to get message history:', e);
+    console.error('Failed to get message history:', e.message, e.data);
   }
 
   return {
