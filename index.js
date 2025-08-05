@@ -146,19 +146,25 @@ async function getRecommendations(vibesData) {
     market: 'US'
   });
 
-  const res = await axios.get(
-    `https://api.spotify.com/v1/recommendations?${params}`,
-    {
-      headers: { Authorization: `Bearer ${token}` }
-    }
-  );
+  const url = `https://api.spotify.com/v1/recommendations?${params}`;
+  console.log('Spotify recommendations URL:', url);
+  console.log('Vibes data:', JSON.stringify(vibesData, null, 2));
 
-  return res.data.tracks.map(t => ({
-    name: `${t.name} – ${t.artists[0].name}`,
-    url: `https://open.spotify.com/track/${t.id}`,
-    energy: t.energy || 0.5,
-    valence: t.valence || 0.5
-  }));
+  try {
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    return res.data.tracks.map(t => ({
+      name: `${t.name} – ${t.artists[0].name}`,
+      url: `https://open.spotify.com/track/${t.id}`,
+      energy: t.energy || 0.5,
+      valence: t.valence || 0.5
+    }));
+  } catch (error) {
+    console.error('Spotify API error:', error.response?.status, error.response?.data);
+    throw error;
+  }
 }
 
 async function generateCoverArt(playlistName, mood) {
