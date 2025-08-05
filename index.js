@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import axios from 'axios';
-import { App, ExpressReceiver } from '@slack/bolt';
+import pkg from '@slack/bolt';
+const { App, ExpressReceiver } = pkg;
 
 const receiver = new ExpressReceiver({
   signingSecret: process.env.SLACK_SIGNING_SECRET,
